@@ -79,6 +79,19 @@ def train_models(df):
     print(f"Delay Classifier ROC-AUC: {auc:.3f}")
     print(f"Delay Regressor MAE: {mae:.2f} days")
     
+    # Export Feature Importance
+    importances = clf.feature_importances_
+    idx = np.argsort(importances)
+    plt.figure(figsize=(8, 6))
+    plt.barh(range(len(idx)), importances[idx], color='teal', align='center')
+    plt.yticks(range(len(idx)), [features[i] for i in idx])
+    plt.xlabel("Random Forest Feature Importance")
+    plt.title("What factors cause delays?")
+    plt.tight_layout()
+    os.makedirs("output", exist_ok=True)
+    plt.savefig("output/feature_importance.png", dpi=150)
+    plt.close()
+    
     return clf, reg, features, X_test, y_test_clf, probs
 
 def optimize_costs(df, clf, reg, features):
@@ -146,7 +159,7 @@ def export_plots(df, upcoming, auc, y_test_clf, probs, total_baseline, total_aft
     # 3. Carrier Performance
     carrier_perf = df.groupby("carrier")["delay_days"].mean().sort_values(ascending=False)
     plt.figure(figsize=(8, 4))
-    sns.barplot(x=carrier_perf.index, y=carrier_perf.values, palette="mako")
+    sns.barplot(x=carrier_perf.index, y=carrier_perf.values, hue=carrier_perf.index, palette="mako", legend=False)
     plt.title("Average Delay by Carrier")
     plt.ylabel("Avg Delay (Days)")
     plt.xticks(rotation=45, ha='right')
@@ -171,7 +184,7 @@ def export_plots(df, upcoming, auc, y_test_clf, probs, total_baseline, total_aft
         "Total_Cost": [total_baseline, total_after]
     })
     plt.figure(figsize=(6, 4))
-    sns.barplot(x="Scenario", y="Total_Cost", data=cost_df, palette="crest")
+    sns.barplot(x="Scenario", y="Total_Cost", data=cost_df, hue="Scenario", palette="crest", legend=False)
     plt.title("Cost Comparison: Baseline vs Optimized")
     plt.ylabel("Total Cost (INR)")
     plt.tight_layout()
@@ -180,7 +193,7 @@ def export_plots(df, upcoming, auc, y_test_clf, probs, total_baseline, total_aft
     
     # 6. Expedite Decisions
     plt.figure(figsize=(6, 4))
-    sns.countplot(x="expedite_decision", data=upcoming, palette="Set2")
+    sns.countplot(x="expedite_decision", data=upcoming, hue="expedite_decision", palette="Set2", legend=False)
     plt.title("Expedite Decisions (0=No, 1=Yes)")
     plt.xlabel("Decision")
     plt.ylabel("Count of Shipments")
