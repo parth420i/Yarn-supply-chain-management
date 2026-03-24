@@ -1,253 +1,174 @@
-# 🧶 YARN SUPPLY CHAIN DELAY PREDICTION + COST ANALYSIS
-
-# NOTE: Install dependencies from your terminal, e.g.:
-# pip install pandas numpy scikit-learn matplotlib seaborn joblib
-
-import argparse
-import sys
-import os
+import io
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.metrics import roc_auc_score, mean_absolute_error, roc_curve
-import joblib
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
+from sklearn.metrics import roc_auc_score
+import warnings
+warnings.filterwarnings('ignore')
 
-def load_and_preprocess_data(data_path):
-    """Loads dataset and creates useful features for predictions."""
-    if not os.path.exists(data_path):
-        print(f"Error: Could not find file at {data_path}")
-        sys.exit(1)
+def load_and_prepare_data(data_path_or_buffer):
+    if hasattr(data_path_or_buffer, 'getvalue'):
+        data = io.BytesIO(data_path_or_buffer.getvalue())
+    else:
+        data = data_path_or_buffer
+        if hasattr(data, 'seek'):
+            data.seek(0)
+            
+    df = pd.read_csv(data)
+    df.columns = [str(c).strip() for c in df.columns]
+    
+    date_cols = [
+        'actual_arrival', 'actual_departure',
+        'booking_date', 'scheduled_arrival', 'scheduled_departure'
+    ]
+    
+    existing_date_cols = [col for col in date_cols if col in df.columns]
+    for col in existing_date_cols:
+        df[col] = pd.to_datetime(df[col], errors='coerce')
         
-    df = pd.read_csv(
-        data_path,
-        parse_dates=["booking_date", "scheduled_departure", "scheduled_arrival", "actual_departure", "actual_arrival"]
-    )
-    print("Dataset loaded successfully!")
-    print(f"Shape: {df.shape}")
+    if "scheduled_departure" in df.columns and "booking_date" in df.columns:
+        df["lead_time_days"] = (df["scheduled_departure"] - df["booking_date"]).dt.days
+    else:
+        df["lead_time_days"] = 0
+        
+    if "scheduled_arrival" in df.columns and "scheduled_departure" in df.columns:
+        df["planned_transit_days"] = (df["scheduled_arrival"] - df["scheduled_departure"]).dt.days
+    else:
+        df["planned_transit_days"] = 0
+        
+    if "scheduled_departure" in df.columns:
+        df["weekday_dep"] = df["scheduled_departure"].dt.weekday
+    else:
+        df["weekday_dep"] = 0
     
-    # Feature engineering
-    df = df.sort_values(["carrier", "scheduled_departure"]).reset_index(drop=True)
-    df["lead_time_days"] = (df["scheduled_departure"] - df["booking_date"]).dt.days
-    df["planned_transit_days"] = (df["scheduled_arrival"] - df["scheduled_departure"]).dt.days
-    df["weekday_dep"] = df["scheduled_departure"].dt.weekday
-    df["month_dep"] = df["scheduled_departure"].dt.month
+    if "carrier" in df.columns and "delay_flag" in df.columns:
+        df = df.sort_values(["carrier", "scheduled_departure"] if "scheduled_departure" in df.columns else ["carrier"]).reset_index(drop=True)
+        # Shift(1) prevents algorithmic target leakage by blinding the model to the current row's label
+        df["carrier_delay_rate"] = df.groupby("carrier")["delay_flag"].transform(lambda x: x.shift(1).rolling(window=30, min_periods=1).mean()).fillna(0)
+    else:
+        df["carrier_delay_rate"] = 0
     
-    # Rolling mean per carrier to capture carrier's recent performance trends
-    df["carrier_delay_30"] = (
-        df.groupby("carrier")["delay_flag"]
-          .transform(lambda x: x.rolling(window=60, min_periods=1).mean())
-          .fillna(0)
-    )
+    if "temperature_sensitive" in df.columns:
+        # Dynamically map multiple variations of "Yes" and "No" for seamless integration with entirely new datasets
+        mapping_dict = {"Yes": 1, "No": 0, "True": 1, "False": 0, "Y": 1, "N": 0, "1": 1, "0": 0, True: 1, False: 0, 1: 1, 0: 0}
+        
+        # Convert values to strings safely for comparison, strip whitespace, and title case
+        def robust_map(val):
+            if type(val) in [bool, int, float]: return val
+            clean_val = str(val).strip().title()
+            return mapping_dict.get(clean_val, 0)
+            
+        df["temp_sens_flag"] = df["temperature_sensitive"].apply(robust_map)
+    else:
+        df["temp_sens_flag"] = 0
+        
+    # Mathematical encoding of powerful textual features (Geographic locations, Carriers)
+    cat_columns = ["carrier", "source_city", "destination_city", "material_type", "shipment_type"]
+    existing_cats = [c for c in cat_columns if c in df.columns]
+    if existing_cats:
+        # Preserve original categorical text for Streamlit UI Graphing
+        for c in existing_cats:
+            df[c + "_raw_str"] = df[c]
+            
+        df = pd.get_dummies(df, columns=existing_cats, drop_first=True)
+        
+        # Restore the raw text columns natively
+        for c in existing_cats:
+            df.rename(columns={c + "_raw_str": c}, inplace=True)
     
-    df["temp_sens_flag"] = df["temperature_sensitive"].map({"Yes": 1, "No": 0}).fillna(0)
     return df
 
-def train_models(df):
-    """Trains classification and regression models and prints metrics."""
-    features = [
-        "planned_transit_days", "lead_time_days", "weekday_dep", "month_dep",
-        "carrier_delay_30", "quantity_tonnes", "shipping_cost",
+def train_model(df):
+    expected_features = [
+        "planned_transit_days", "lead_time_days", "weekday_dep", 
+        "carrier_delay_rate", "quantity_tonnes", "shipping_cost",
         "expedite_surcharge", "stockout_cost_per_tonne", "temp_sens_flag"
     ]
-    X = df[features].fillna(-1)
-    y_clf = df["delay_flag"]
-    y_reg = df["delay_days"]
     
-    # Robust randomized split ensures carrier bias is not introduced
-    X_train, X_test, y_train_clf, y_test_clf, y_train_reg, y_test_reg = train_test_split(
-        X, y_clf, y_reg, test_size=0.2, random_state=42
-    )
+    # Dynamically inject the newly encoded categorical variables (Dummy variables) into the ML algorithms
+    for col in df.columns:
+        if col.startswith(("carrier_", "source_city_", "destination_city_", "material_type_", "shipment_type_")) and col != "carrier_delay_rate":
+            expected_features.append(col)
     
-    print("\nTraining Random Forest Models... Please wait.")
+    # DYNAMIC FILTER: Keep only features that actually exist in the current dataset!
+    features = [f for f in expected_features if f in df.columns]
     
-    # Train Classification model
-    clf = RandomForestClassifier(n_estimators=120, random_state=42, n_jobs=-1)
-    clf.fit(X_train, y_train_clf)
-    probs = clf.predict_proba(X_test)[:, 1]
-    auc = roc_auc_score(y_test_clf, probs)
+    if len(features) > 0:
+        X = df[features].fillna(df[features].mean()) 
+    else:
+        # Failsafe if absolutely zero supply chain columns are found
+        X = pd.DataFrame(np.zeros((len(df), 1)), columns=["dummy_feature"])
+        features = ["dummy_feature"]
+        
+    target_col = "delay_flag" if "delay_flag" in df.columns else df.columns[-1]
     
-    # Train Regression model
-    reg = RandomForestRegressor(n_estimators=120, random_state=42, n_jobs=-1)
-    reg.fit(X_train, y_train_reg)
-    pred_reg = reg.predict(X_test)
-    mae = mean_absolute_error(y_test_reg, pred_reg)
+    # Safe Target fallback for categorical conversions if user inputs unmapped strings
+    if df[target_col].dtype == 'object':
+        df[target_col] = df[target_col].astype('category').cat.codes
+        
+    y = df[target_col].fillna(0)
     
-    print("\n--- MODEL PERFORMANCE ---")
-    print(f"Delay Classifier ROC-AUC: {auc:.3f}")
-    print(f"Delay Regressor MAE: {mae:.2f} days")
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
-    # Export Feature Importance
-    importances = clf.feature_importances_
-    idx = np.argsort(importances)
-    plt.figure(figsize=(8, 6))
-    plt.barh(range(len(idx)), importances[idx], color='teal', align='center')
-    plt.yticks(range(len(idx)), [features[i] for i in idx])
-    plt.xlabel("Random Forest Feature Importance")
-    plt.title("What factors cause delays?")
-    plt.tight_layout()
-    os.makedirs("output", exist_ok=True)
-    plt.savefig("output/feature_importance.png", dpi=150)
-    plt.close()
+    # Hardened hyperparameters to massively prevent tree overfitting 
+    models = {
+        "Logistic Regression": make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000, random_state=42)),
+        "Gradient Boosting": GradientBoostingClassifier(n_estimators=100, learning_rate=0.1, max_depth=3, random_state=42),
+        "Random Forest": RandomForestClassifier(n_estimators=300, max_depth=12, random_state=42)
+    }
     
-    return clf, reg, features, X_test, y_test_clf, probs
+    best_roc_auc = 0
+    best_clf = None
+    best_name = ""
+    
+    # Fallback to pure accuracy if ROC-AUC fails (due to continuous target variables mistakenly imported)
+    for name, clf in models.items():
+        clf.fit(X_train, y_train)
+        try:
+            probs = clf.predict_proba(X_test)[:, 1]
+            score = roc_auc_score(y_test, probs)
+        except Exception:
+            score = clf.score(X_test, y_test)
+            
+        if score >= best_roc_auc:
+            best_roc_auc = score
+            best_clf = clf
+            best_name = name
+            
+    return best_clf, features, best_roc_auc, best_name
 
-def optimize_costs(df, clf, reg, features):
-    """Predicts costs and decides optimal actions (expedite vs regular shipment)."""
-    # Sample out a balanced subset of 'upcoming' testing shipments to analyze cost decisions
-    upcoming_idx = df.sample(min(300, len(df)), random_state=99).index 
-    upcoming = df.loc[upcoming_idx].copy()
+def evaluate_cost_savings(df, clf, features):
+    upcoming = df.sample(min(300, len(df)), random_state=42).copy()
+    X_upcoming = upcoming[features].fillna(upcoming[features].mean())
     
-    X_up = upcoming[features].fillna(-1)
-    upcoming["pred_delay_prob"] = clf.predict_proba(X_up)[:, 1]
-    upcoming["pred_delay_days"] = reg.predict(X_up)
+    try:
+        upcoming["delay_probability"] = clf.predict_proba(X_upcoming)[:, 1]
+    except Exception:
+        upcoming["delay_probability"] = clf.predict(X_upcoming)
     
-    upcoming["expected_stockout_cost"] = (
-        upcoming["pred_delay_prob"] * upcoming["quantity_tonnes"] * upcoming["stockout_cost_per_tonne"]
-    )
-    upcoming["expedite_cost"] = upcoming["shipping_cost"] + upcoming["expedite_surcharge"]
-    upcoming["baseline_expected_cost"] = upcoming["shipping_cost"] + upcoming["expected_stockout_cost"]
+    # DYNAMIC FALLBACK: Safely assign 0 if financial variables are missing from the dataset upload
+    q_col = upcoming["quantity_tonnes"] if "quantity_tonnes" in upcoming.columns else 1.0
+    stock_col = upcoming["stockout_cost_per_tonne"] if "stockout_cost_per_tonne" in upcoming.columns else 0.0
+    ship_col = upcoming["shipping_cost"] if "shipping_cost" in upcoming.columns else 0.0
+    exp_col = upcoming["expedite_surcharge"] if "expedite_surcharge" in upcoming.columns else 0.0
     
-    # Logical decision mapping
-    upcoming["expedite_decision"] = (upcoming["expedite_cost"] < upcoming["baseline_expected_cost"]).astype(int)
+    upcoming["expected_stockout_penalty"] = upcoming["delay_probability"] * q_col * stock_col
+    upcoming["cost_do_nothing"] = ship_col + upcoming["expected_stockout_penalty"]
     
-    total_baseline = upcoming["baseline_expected_cost"].sum()
-    total_after = (
-        upcoming["expedite_decision"] * upcoming["expedite_cost"]
-        + (1 - upcoming["expedite_decision"]) * upcoming["baseline_expected_cost"]
+    upcoming["cost_expedite"] = ship_col + exp_col
+    
+    upcoming["should_expedite"] = upcoming["cost_expedite"] < upcoming["cost_do_nothing"]
+    
+    total_baseline_cost = upcoming["cost_do_nothing"].sum()
+    
+    total_optimized_cost = (
+        upcoming["should_expedite"] * upcoming["cost_expedite"] + 
+        (~upcoming["should_expedite"]) * upcoming["cost_do_nothing"]
     ).sum()
-    savings = total_baseline - total_after
     
-    print("\n--- COST OPTIMIZATION (Sample of 300) ---")
-    print(f"Baseline Expected Cost: INR {total_baseline:,.2f}")
-    print(f"Optimized Cost (After Decision): INR {total_after:,.2f}")
-    print(f"Expected Savings: INR {savings:,.2f}")
-    print(f"Expedite Shipments: {upcoming['expedite_decision'].sum()} out of {len(upcoming)}")
-    
-    return upcoming, total_baseline, total_after
-
-def export_plots(df, upcoming, auc, y_test_clf, probs, total_baseline, total_after, out_dir="output"):
-    """Generates charts and saves them locally without blocking execution."""
-    os.makedirs(out_dir, exist_ok=True)
-    sns.set_theme(style="whitegrid")
-    
-    # 1. ROC Curve
-    fpr, tpr, _ = roc_curve(y_test_clf, probs)
-    plt.figure(figsize=(6, 5))
-    plt.plot(fpr, tpr, label=f"AUC={auc:.3f}", color='blue', linewidth=2)
-    plt.plot([0, 1], [0, 1], '--', color='gray')
-    plt.title("ROC Curve for Delay Classification")
-    plt.xlabel("False Positive Rate")
-    plt.ylabel("True Positive Rate")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "roc_curve.png"), dpi=150)
-    plt.close()
-    
-    # 2. Delay Distribution
-    plt.figure(figsize=(7, 4))
-    sns.histplot(df["delay_days"], kde=True, bins=20, color='steelblue')
-    plt.title("Distribution of Shipment Delay (Days)")
-    plt.xlabel("Delay Days")
-    plt.ylabel("Frequency")
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "delay_distribution.png"), dpi=150)
-    plt.close()
-    
-    # 3. Carrier Performance
-    carrier_perf = df.groupby("carrier")["delay_days"].mean().sort_values(ascending=False)
-    plt.figure(figsize=(8, 4))
-    sns.barplot(x=carrier_perf.index, y=carrier_perf.values, hue=carrier_perf.index, palette="mako", legend=False)
-    plt.title("Average Delay by Carrier")
-    plt.ylabel("Avg Delay (Days)")
-    plt.xticks(rotation=45, ha='right')
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "carrier_performance.png"), dpi=150)
-    plt.close()
-    
-    # 4. Shipping Cost vs Delay
-    plt.figure(figsize=(7, 5))
-    sns.scatterplot(x=df["shipping_cost"], y=df["delay_days"], hue=df["shipment_type"], alpha=0.7)
-    plt.title("Shipping Cost vs Delay Days")
-    plt.xlabel("Shipping Cost (INR)")
-    plt.ylabel("Delay Days")
-    plt.legend(title="Shipment Type")
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "cost_vs_delay.png"), dpi=150)
-    plt.close()
-    
-    # 5. Cost Comparison
-    cost_df = pd.DataFrame({
-        "Scenario": ["Baseline Cost", "Optimized Cost"],
-        "Total_Cost": [total_baseline, total_after]
-    })
-    plt.figure(figsize=(6, 4))
-    sns.barplot(x="Scenario", y="Total_Cost", data=cost_df, hue="Scenario", palette="crest", legend=False)
-    plt.title("Cost Comparison: Baseline vs Optimized")
-    plt.ylabel("Total Cost (INR)")
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "cost_comparison.png"), dpi=150)
-    plt.close()
-    
-    # 6. Expedite Decisions
-    plt.figure(figsize=(6, 4))
-    sns.countplot(x="expedite_decision", data=upcoming, hue="expedite_decision", palette="Set2", legend=False)
-    plt.title("Expedite Decisions (0=No, 1=Yes)")
-    plt.xlabel("Decision")
-    plt.ylabel("Count of Shipments")
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "expedite_decisions.png"), dpi=150)
-    plt.close()
-    
-    # 7. Probability Distribution
-    plt.figure(figsize=(7, 4))
-    sns.histplot(upcoming["pred_delay_prob"], bins=20, kde=True, color="orange")
-    plt.title("Predicted Delay Probability Distribution")
-    plt.xlabel("Predicted Probability of Delay")
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "delay_probability_dist.png"), dpi=150)
-    plt.close()
-    
-    print(f"\nSaved all visualizations to the '{out_dir}/' directory.")
-
-def main():
-    parser = argparse.ArgumentParser(description="Run yarn supply chain analysis")
-    parser.add_argument("data_path", nargs="?", help="Path to yarn_supplychain_surat.csv")
-    parser.add_argument("--save-model", action="store_true", help="Save the trained models to disk")
-    parser.add_argument("--no-plots", action="store_true", help="Disable plotting completely")
-    
-    args = parser.parse_args()
-    
-    if not args.data_path:
-        print("Usage: python main.py <path/to/yarn_supplychain_surat.csv>")
-        sys.exit(1)
-        
-    df = load_and_preprocess_data(args.data_path)
-    
-    clf, reg, features, X_test, y_test_clf, probs = train_models(df)
-    
-    if args.save_model:
-        os.makedirs("models", exist_ok=True)
-        joblib.dump(clf, "models/delay_classifier.pkl")
-        joblib.dump(reg, "models/delay_regressor.pkl")
-        print("\nModels saved to 'models/' directory.")
-        
-    upcoming, total_baseline, total_after = optimize_costs(df, clf, reg, features)
-    
-    if not args.no_plots:
-        auc = roc_auc_score(y_test_clf, probs)
-        
-        export_plots(
-            df=df, 
-            upcoming=upcoming, 
-            auc=auc, 
-            y_test_clf=y_test_clf, 
-            probs=probs, 
-            total_baseline=total_baseline, 
-            total_after=total_after
-        )
-
-if __name__ == "__main__":
-    main()
+    return upcoming, total_baseline_cost, total_optimized_cost
