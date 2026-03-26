@@ -1,49 +1,7 @@
-import streamlit as st
+﻿import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import sys
-
-# --- Environment Hack for stlite/Pyodide ---
-# Plotly (via narwhals) checks for pyarrow.ChunkedArray which may be missing in some Pyodide versions.
-# We bypass this by converting data to simple lists before passing to Plotly.
-def safe_px_bar(*args, **kwargs):
-    # Convert DataFrames to lists if x or y are column names
-    if 'data_frame' in kwargs and isinstance(kwargs['data_frame'], pd.DataFrame):
-        df = kwargs['data_frame']
-        if 'x' in kwargs and isinstance(kwargs['x'], str) and kwargs['x'] in df.columns:
-            kwargs['x'] = df[kwargs['x']].tolist()
-        if 'y' in kwargs and isinstance(kwargs['y'], str) and kwargs['y'] in df.columns:
-            kwargs['y'] = df[kwargs['y']].tolist()
-        if 'color' in kwargs and isinstance(kwargs['color'], str) and kwargs['color'] in df.columns:
-            kwargs['color'] = df[kwargs['color']].tolist()
-        # Remove data_frame to force plotly to use the lists directly
-        del kwargs['data_frame']
-    elif len(args) > 0 and isinstance(args[0], pd.DataFrame):
-        df = args[0]
-        new_kwargs = kwargs.copy()
-        if 'x' in kwargs and isinstance(kwargs['x'], str) and kwargs['x'] in df.columns:
-            new_kwargs['x'] = df[kwargs['x']].tolist()
-        if 'y' in kwargs and isinstance(kwargs['y'], str) and kwargs['y'] in df.columns:
-            new_kwargs['y'] = df[kwargs['y']].tolist()
-        if 'color' in kwargs and isinstance(kwargs['color'], str) and kwargs['color'] in df.columns:
-            new_kwargs['color'] = df[kwargs['color']].tolist()
-        return px.bar(*args[1:], **new_kwargs)
-    return px.bar(*args, **kwargs)
-
-try:
-    import pyarrow as pa
-    if not hasattr(pa, 'ChunkedArray'):
-        pa.ChunkedArray = type('ChunkedArray', (), {})
-    if not hasattr(pa, 'Table'):
-        pa.Table = type('Table', (), {})
-except ImportError:
-    from types import ModuleType
-    pa = ModuleType('pyarrow')
-    pa.ChunkedArray = type('ChunkedArray', (), {})
-    pa.Table = type('Table', (), {})
-    sys.modules['pyarrow'] = pa
-
 from main import load_and_prepare_data, train_model, evaluate_cost_savings
 
 # --- General System Setup ---
@@ -71,7 +29,7 @@ if uploaded_file:
         try:
             # 1. Load and prep data
             df = load_and_prepare_data(uploaded_file)
-            st.sidebar.success(f"✓ {len(df):,} records successfully configured.")
+            st.sidebar.success(f"âœ“ {len(df):,} records successfully configured.")
             data_loaded = True
         except KeyError as e:
             st.error(f"Dataset structure error. Expected a Supply Chain column not found. ({str(e)})")
@@ -98,31 +56,16 @@ if uploaded_file:
             with g_col1:
                 if "carrier" in df.columns:
                     carrier_delay = df.groupby("carrier")["delay_flag"].mean().reset_index()
-                    # Using safe lists to avoid Arrow attributes error
-                    fig_c = px.bar(
-                        x=carrier_delay["carrier"].tolist(), 
-                        y=carrier_delay["delay_flag"].tolist(), 
-                        title="Actual Failure Rate per Carrier", 
-                        color=carrier_delay["carrier"].tolist(),
-                        labels={"x": "Carrier Network", "y": "Delay Probability", "color": "Carrier"}
-                    )
+                    fig_c = px.bar(carrier_delay, x="carrier", y="delay_flag", title="Actual Failure Rate per Carrier", color="carrier")
                     fig_c.update_layout(yaxis_title="Delay Probability", xaxis_title="Carrier Network")
                     st.plotly_chart(fig_c, use_container_width=True)
             with g_col2:
                 if "source_city" in df.columns and "destination_city" in df.columns:
+                    # Dynamically construct routing text natively without mutating the main math frame
                     plot_df = df.copy()
-                    plot_df["Route"] = plot_df["source_city"] + " → " + plot_df["destination_city"]
+                    plot_df["Route"] = plot_df["source_city"] + " â†’ " + plot_df["destination_city"]
                     route_delay = plot_df.groupby("Route")["delay_flag"].mean().reset_index().sort_values("delay_flag", ascending=False).head(5)
-                    # Using safe lists
-                    fig_r = px.bar(
-                        x=route_delay["delay_flag"].tolist(), 
-                        y=route_delay["Route"].tolist(), 
-                        orientation='h', 
-                        title="Top 5 Most High-Risk Corridors", 
-                        color=route_delay["delay_flag"].tolist(), 
-                        color_continuous_scale="Reds",
-                        labels={"x": "Delay Probability", "y": "Route", "color": "Risk Level"}
-                    )
+                    fig_r = px.bar(route_delay, x="delay_flag", y="Route", orientation='h', title="Top 5 Most High-Risk Corridors", color="delay_flag", color_continuous_scale="Reds")
                     fig_r.update_layout(xaxis_title="Delay Probability")
                     st.plotly_chart(fig_r, use_container_width=True)
                     
@@ -138,18 +81,8 @@ if uploaded_file:
             col3.metric("Total Capital Preserved", f"INR {savings:,.0f}", f"{savings/baseline_cost*100:.1f}% Margin Retention")
             
             # Visualize the explicit cost delta 
-            cost_data = {
-                "Execution Strategy": ["Baseline Freight Execution", "ML Expected-Value Intervention"],
-                "Total Logistics Overhead (INR)": [baseline_cost, optimized_cost]
-            }
-            fig_cost = px.bar(
-                x=cost_data["Execution Strategy"], 
-                y=cost_data["Total Logistics Overhead (INR)"], 
-                color=cost_data["Execution Strategy"], 
-                color_discrete_sequence=["#e74c3c", "#2ecc71"], 
-                text=cost_data["Total Logistics Overhead (INR)"],
-                labels={"x": "Strategy", "y": "logistics Overhead", "color": "Strategy"}
-            )
+            cost_df = pd.DataFrame({"Execution Strategy": ["Baseline Freight Execution", "ML Expected-Value Intervention"], "Total Logistics Overhead (INR)": [baseline_cost, optimized_cost]})
+            fig_cost = px.bar(cost_df, x="Execution Strategy", y="Total Logistics Overhead (INR)", color="Execution Strategy", color_discrete_sequence=["#e74c3c", "#2ecc71"], text="Total Logistics Overhead (INR)")
             fig_cost.update_layout(showlegend=False, xaxis_title="")
             st.plotly_chart(fig_cost, use_container_width=True)
             
@@ -165,13 +98,7 @@ if uploaded_file:
                     "Relative Importance Weight": importances
                 }).sort_values(by="Relative Importance Weight", ascending=False).head(10)
                 
-                fig_imp = px.bar(
-                    x=imp_df["Relative Importance Weight"].tolist(), 
-                    y=imp_df["Feature Indicator"].tolist(), 
-                    orientation='h', 
-                    color_discrete_sequence=["#3498db"],
-                    labels={"x": "Importance Weight", "y": "Feature"}
-                )
+                fig_imp = px.bar(imp_df, x="Relative Importance Weight", y="Feature Indicator", orientation='h', color_discrete_sequence=["#3498db"])
                 fig_imp.update_layout(yaxis={'categoryorder':'total ascending'})
                 st.plotly_chart(fig_imp, use_container_width=True)
                 
@@ -185,14 +112,7 @@ if uploaded_file:
                         "Relative Impact Vector": coefs
                     }).sort_values(by="Relative Impact Vector", ascending=False).head(10)
                     
-                    fig_imp = px.bar(
-                        x=imp_df["Relative Impact Vector"].tolist(), 
-                        y=imp_df["Feature Indicator"].tolist(), 
-                        orientation='h', 
-                        color_discrete_sequence=["#f39c12"], 
-                        title="Logistic Regression Intercept Vectors",
-                        labels={"x": "Impact Vector", "y": "Feature"}
-                    )
+                    fig_imp = px.bar(imp_df, x="Relative Impact Vector", y="Feature Indicator", orientation='h', color_discrete_sequence=["#f39c12"], title="Logistic Regression Intercept Vectors")
                     fig_imp.update_layout(yaxis={'categoryorder':'total ascending'})
                     st.plotly_chart(fig_imp, use_container_width=True)
             

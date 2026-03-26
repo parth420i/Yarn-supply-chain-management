@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Supply Chain Risk & Cost Analyzer</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.55.0/build/stlite.css" />
+  <style>
+    body,
+    html,
+    #stlite {
+      margin: 0;
+      padding: 0;
+      height: 100vh;
+      width: 100vw;
+    }
+
+    #loading {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-family: sans-serif;
+      text-align: center;
+      z-index: 1000;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="loading">
+    <h2>Initializing Supply Chain Dashboard...</h2>
+    <p>Loading Python environment (Pyodide). This may take up to a minute on the first load.</p>
+  </div>
+  <div id="stlite"></div>
+  <script src="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.55.0/build/stlite.js"></script>
+  <script>
+    async function main() {
+      const fetchFile = async (url) => {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Failed to fetch ${url}`);
+        return await res.text();
+      };
+
+      try {
+        // Add cache buster to ensure latest files are fetched
+        const cb = `?t=${Date.now()}`;
+        const [appPy, mainPy, csvData] = await Promise.all([
+          fetchFile(`./app.py${cb}`),
+          fetchFile(`./main.py${cb}`),
+          fetchFile(`./yarn_supplychain_surat.csv${cb}`)
+        ]);
+
+        document.getElementById("loading").style.display = "none";
+
+        stlite.mount(
+          {
+            // Adding pyarrow and pinning plotly to avoid narwhals compatibility issues in stlite
+            requirements: ["pandas", "numpy", "scikit-learn", "plotly==5.24.1", "matplotlib", "seaborn"],
+            entrypoint: "app.py",
+            files: {
+              "app.py": appPy,
+              "main.py": mainPy,
+              "yarn_supplychain_surat.csv": csvData
+            },
+          },
+          document.getElementById("stlite")
+        );
+      } catch (err) {
+        console.error(err);
+        document.getElementById("loading").innerHTML = `<div style="padding: 20px; color: red;">Error loading application: ${err.message}</div>`;
+      }
+    }
+    main();
+  </script>
+</body>
+
+</html>

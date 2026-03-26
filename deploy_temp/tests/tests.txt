@@ -1,0 +1,23 @@
+# Tests
+
+## Test 1 - App loads and shows loading state [sanity]
+Viewport: desktop
+Description: Verifies the stlite environment initializes.
+
+Steps:
+1. Navigate to the app
+2. Wait for stlite boot up
+3. Confirm title "Supply Chain Risk & Cost Analyzer" is visible
+
+Expected: Page title is visible and stlite starts loading python packages.
+
+## Test 2 - App sidebar exists
+Viewport: desktop
+Description: Verifies the sidebar is rendered.
+
+Steps:
+1. Navigate to the app
+2. Wait for loading
+3. Check for sidebar content
+
+Expected: Sidebar with "Data Input" text is visible.

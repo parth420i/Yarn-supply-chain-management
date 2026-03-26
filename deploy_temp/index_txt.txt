@@ -1,0 +1,64 @@
+﻿<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0"
+    />
+    <title>Supply Chain Risk & Cost Analyzer</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.55.0/build/stlite.css"
+    />
+    <style>
+      body, html, #stlite {
+        margin: 0;
+        padding: 0;
+        height: 100vh;
+        width: 100vw;
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stlite"></div>
+    <script src="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.55.0/build/stlite.js"></script>
+    <script>
+      async function main() {
+        const fetchFile = async (url) => {
+          const res = await fetch(url);
+          if (!res.ok) throw new Error(`Failed to fetch ${url}`);
+          return await res.text();
+        };
+
+        try {
+          // Fetch files from the current directory
+          const [appPy, mainPy, csvData] = await Promise.all([
+            fetchFile("./app.py"),
+            fetchFile("./main.py"),
+            fetchFile("./yarn_supplychain_surat.csv")
+          ]);
+
+          stlite.mount(
+            {
+              requirements: ["pandas", "numpy", "scikit-learn", "plotly"],
+              entrypoint: "app.py",
+              files: {
+                "app.py": appPy,
+                "main.py": mainPy,
+                "yarn_supplychain_surat.csv": csvData
+              },
+            },
+            document.getElementById("stlite")
+          );
+        } catch (err) {
+          console.error(err);
+          document.getElementById("stlite").innerHTML = `<div style="padding: 20px; color: red;">Error loading application: ${err.message}</div>`;
+        }
+      }
+      main();
+    </script>
+  </body>
+</html>
